@@ -187,9 +187,114 @@ class GPT(nn.Module):
 
         if targets is not None:
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
             return logits, loss
         else:
             logits = self.lm_head(x[:, [-1], :])
             return logits, None
 
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        # Generate tokens given a conditioning sequence, idx: Tensor of shape
+        for _ in range(max_new_tokens):
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('inf')
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+        return idx
+
+
+config = GPTConfig(
+    vocab_size=50257,
+    block_size = 128,
+    n_layer = 6,
+    n_head = 6,
+    n_embd= 384,
+    dropout=0.1,
+    bias=True
+)
+
+model = GPT(config)
+
+def estimate_loss(model):
+    out = {}
+    model.eval()
+    with torch.inference_mode():
+        for split in ['train', 'val']:
+            losses = torch.zeros(eval_iters)
+            for k in range(eval_iters):
+                X, Y = get_batch(split)
+                with ctx:
+                    logits, loss = model(X, Y)
+                losses[k] = loss.item()
+            out[split] = losses.mean()
+    model.train()
+    return out
+
+# training configuration
+import torch
+from contextlib import nullcontext
+
+learning_rate = 1e-4
+max_iters = 20000
+warmup_steps = 1000
+min_lr = 5e-4
+eval_iters = 100
+batch_size = 32
+block_size = 128
+
+# we are doing the parameter update after 32 steps
+gradient_accumulation_steps = 32
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+# note: float16 data type will automatically use a  GradScaler
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+torch.set_default_device(device)
+torch.manual_seed(42)
+
+from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
+
+# PUT IN WEIGHT DECAY,  CHANGED BETA2 to 0.95
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.95), weight_decay=0.1, epochs=1)
+
+scheduler_warmup = LinearLR(optimizer, total_iters = warmup_steps) # Implement linear warmup
+scheduler_decay = CosineAnnealingLR(optimizer,T_max = max_iters - warmup_steps, eta_min = min_lr)
+scheduler = SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_decay], milestones=[warmup_steps])
+
+scaler = torch.cuda.amp.GradScaler(enambled=(dtype == 'float16'))
+
+best_val_loss = float('inf')
+best_model_params_path = "best_model_params.pt"
+train_loss_list, validation_loss_list = [], []
+model = model.to(device)
+# in the training loop
+for epoch in tqdm(range(max_iters)):
+    if epoch % eval_iters == 0 and epoch != 0:
+        # Ensure estimate_loss uses the correct device
+        losses = estimate_loss(model)
+        print(f"Epoch {epoch}: training loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"The current learning rate: {optimizer.param_groups[0]['lr']:.5f}")
+        train_loss_list += [losses['train']]
+        validation_loss_list += [losses['val']]
+
+        if losses['val'] < best_val_loss:
+            best_val_loss = losses['val']
+            torch.save(model.state_dict(), best_model_params_path)
+        
+    # Ensure X and y are on the correct device
+    X, y = get_batch("train")
+    X, y = X.to(device), y.to(device)
+
+    with ctx:
+        logits, loss = model(X, y)
+        loss = loss / gradient_accumulation_steps
+        scaler.scale(loss.backward())
