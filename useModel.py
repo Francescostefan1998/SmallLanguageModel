@@ -1,32 +1,71 @@
-# useModel.py - Clean inference script
+# useModel.py - Fixed inference script
 import tiktoken
 import torch
-from model_classes import GPT, GPTConfig
+import json
+from model_class import GPT, GPTConfig
 
-def load_model(model_path="best_model_params.pt"):
+def load_model(model_path="gpt_model_complete.pt", config_path="model_config.json"):
     """Load the trained GPT model"""
-    # Initialize model configuration (must match training config)
-    config = GPTConfig(
-        vocab_size=50257,
-        block_size=128,
-        n_layer=6,
-        n_head=6,
-        n_embd=384,
-        dropout=0.1,  # This will be ignored in eval mode
-        bias=True
-    )
-    
     # Set device
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"🚀 Using device: {device}")
     
-    # Create model and load weights
+    # Load config from JSON file
+    try:
+        with open(config_path, 'r') as f:
+            config_dict = json.load(f)
+        config = GPTConfig(**config_dict)
+        print(f"📋 Loaded config from {config_path}")
+        print(f"   - Vocab size: {config.vocab_size:,}")
+        print(f"   - Block size: {config.block_size}")
+        print(f"   - Layers: {config.n_layer}")
+        print(f"   - Heads: {config.n_head}")
+        print(f"   - Embedding dim: {config.n_embd}")
+    except FileNotFoundError:
+        print(f"⚠️  Config file {config_path} not found, using default config")
+        config = GPTConfig(
+            vocab_size=50257,
+            block_size=128,
+            n_layer=6,
+            n_head=6,
+            n_embd=384,
+            dropout=0.1,
+            bias=True
+        )
+    
+    # Load the checkpoint
+    try:
+        # Method 1: Try with safe globals (recommended)
+        with torch.serialization.safe_globals([GPTConfig]):
+            checkpoint = torch.load(model_path, map_location=device)
+    except:
+        # Method 2: Fallback to weights_only=False (if you trust the file)
+        print("⚠️  Using weights_only=False (fallback method)")
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    
+    # Create model
     model = GPT(config).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    
+    # Load the model state dict from checkpoint
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print("✅ Loaded model_state_dict from checkpoint")
+    else:
+        # If the checkpoint is just the state dict itself
+        model.load_state_dict(checkpoint)
+        print("✅ Loaded state dict directly")
+    
     model.eval()
     
     print(f"📦 Model loaded successfully!")
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    # Print some checkpoint info if available
+    if isinstance(checkpoint, dict):
+        if 'best_val_loss' in checkpoint:
+            print(f"📊 Best validation loss: {checkpoint['best_val_loss']:.4f}")
+        if 'train_loss_history' in checkpoint and checkpoint['train_loss_history']:
+            print(f"📈 Final training loss: {checkpoint['train_loss_history'][-1]:.4f}")
     
     return model, device
 
@@ -53,7 +92,7 @@ def generate_text(model, device, prompt, max_tokens=100, temperature=0.8, top_k=
 # Main usage
 if __name__ == "__main__":
     # Load model
-    model, device = load_model("best_model_params.pt")
+    model, device = load_model("gpt_model_complete.pt", "model_config.json")
     
     # Test generation
     test_prompt = "Tell me a stupid story without girls name Lily"
