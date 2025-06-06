@@ -1,0 +1,4 @@
+_pycache_/
+train.bin
+gpt_model_complete.pt
+validation.bin

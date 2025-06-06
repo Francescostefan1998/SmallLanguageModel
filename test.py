@@ -1,5 +1,6 @@
 # SOLUTION: Direct dataset loading for Google Colab
 # The dataset downloaded successfully, we just need to access it properly
+# !pip install datasets  # for Hugging Face datasets
 
 import os
 from datasets import load_dataset, Dataset
@@ -45,8 +46,21 @@ def load_dataset_colab_fix():
                 print("✅ Method 3 successful!")
                 return ds
             except Exception as e3:
-                print(f"❌ Method 3 failed: {e3}")
-                return None
+                print(f"❌ Method 3 failed: {e2}")
+            
+                try:
+                    print("Attempting Method 4: Load with trust_remote_code...")
+                    ds = load_dataset(
+                            "roneneldan/TinyStories",
+                            split="train[:10%]",  # safer size
+                            download_mode="force_redownload",  # avoid local cache issues
+                            verification_mode="no_checks"      # skip checksum verification
+                            )
+                    print("✅ Method 4 successful!")
+                    return ds
+                except Exception as e3:
+                  print(f"❌ Method 4 failed: {e3}")
+                  return None
 
 # Try loading the dataset
 ds = load_dataset_colab_fix()
@@ -492,3 +506,7 @@ print(f"Generated: {generated_text}")
 print(f"\n📈 Final Results:")
 print(f"Best validation loss: {best_val_loss:.4f}")
 print(f"Training completed successfully! 🚀")
+
+# first run the following separately
+
+# pip install -U datasets 
